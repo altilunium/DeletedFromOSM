@@ -3,26 +3,28 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OSM Deleted Objects Explorer</title>
+  <title>OSM Deleted Objects Finder</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; height: 100vh; overflow: hidden; }
+    body { display: flex; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     #map { flex: 1; height: 100%; z-index: 1; }
-    #sidebar { width: 380px; height: 100%; background: #ffffff; border-left: 1px solid #e5e7eb; display: flex; flex-direction: column; z-index: 2; box-shadow: -2px 0 10px rgba(0,0,0,0.05); }
-    .header { padding: 16px; background: #111827; color: white; }
+    #sidebar { width: 400px; background: #ffffff; border-left: 1px solid #e5e7eb; display: flex; flex-direction: column; height: 100%; z-index: 2; box-shadow: -2px 0 10px rgba(0,0,0,0.05); }
+    .header { padding: 16px; background: #111827; color: #ffffff; }
     .header h1 { font-size: 1.1rem; margin-bottom: 10px; font-weight: 600; }
-    button { width: 100%; background: #e11d48; color: white; border: none; padding: 10px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: background 0.2s, opacity 0.2s; }
+    button { width: 100%; background: #e11d48; color: #ffffff; border: none; padding: 10px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: background 0.2s, opacity 0.2s; }
     button:hover:not(:disabled) { background: #be123c; }
     button:disabled { background: #9ca3af; cursor: not-allowed; opacity: 0.6; }
-    .status { padding: 12px 16px; font-size: 0.85rem; color: #4b5563; border-bottom: 1px solid #e5e7eb; background: #f9fafb; }
+    .status { padding: 12px 16px; font-size: 0.85rem; color: #4b5563; border-bottom: 1px solid #e5e7eb; background: #f9fafb; line-height: 1.4; }
     .results-container { flex: 1; overflow-y: auto; padding: 12px; }
     .card { background: #f3f4f6; border-radius: 8px; padding: 12px; margin-bottom: 10px; border-left: 4px solid #e11d48; font-size: 0.85rem; cursor: pointer; transition: background 0.2s; }
     .card:hover { background: #e5e7eb; }
+    .card.create-card { border-left-color: #10b981; }
     .card-title { font-weight: 700; color: #111827; margin-bottom: 6px; word-break: break-all; }
     .card-meta { color: #4b5563; line-height: 1.4; font-size: 0.8rem; }
     .tag-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-family: monospace; font-size: 0.75rem; }
     .tag-table td { padding: 3px 6px; border: 1px solid #d1d5db; background: #ffffff; word-break: break-all; }
+    .notice { padding: 10px; text-align: center; color: #6b7280; font-size: 0.8rem; }
   </style>
 </head>
 <body>
@@ -34,7 +36,7 @@
       <h1>OSM Deleted Objects Finder</h1>
       <button id="fetch-btn" disabled>Get deleted objects around this area</button>
     </div>
-    <div id="status" class="status">Zoom in to the maximum level to enable search.</div>
+    <div id="status" class="status">Zoom in closer to enable search.</div>
     <div id="results" class="results-container"></div>
   </div>
 
@@ -48,25 +50,78 @@
       attribution: '&copy; OpenStreetMap contributors | Overpass API'
     }).addTo(map);
 
-    let deletedLayerGroup = L.layerGroup().addTo(map);
+    let mapLayerGroup = L.layerGroup().addTo(map);
 
     const fetchBtn = document.getElementById('fetch-btn');
     const statusDiv = document.getElementById('status');
     const resultsDiv = document.getElementById('results');
 
-    function updateButtonState() {
+    let isFetching = false;
+
+    function updateZoomState() {
       const currentZoom = map.getZoom();
-      if (currentZoom >= MAX_ZOOM) {
-        fetchBtn.disabled = false;
-        statusDiv.textContent = 'Maximum zoom level reached. Ready to search deleted objects.';
-      } else {
+      if (currentZoom < MAX_ZOOM) {
         fetchBtn.disabled = true;
+        statusDiv.dataset.hasResults = '';
         statusDiv.textContent = `Zoom in closer to enable search (Current zoom: ${currentZoom}/${MAX_ZOOM}).`;
+      } else {
+        fetchBtn.disabled = isFetching;
+        if (!statusDiv.dataset.hasResults && !isFetching) {
+          statusDiv.textContent = 'Maximum zoom level reached. Ready to search objects.';
+        }
       }
     }
 
-    map.on('zoomend', updateButtonState);
-    updateButtonState();
+    map.on('zoomend', updateZoomState);
+    updateZoomState();
+
+    function parseElementData(targetEl) {
+      const type = targetEl.tagName;
+      const id = targetEl.getAttribute('id');
+      const osmId = `${type}/${id}`;
+      const user = targetEl.getAttribute('user') || 'Anonymous';
+      const rawTime = targetEl.getAttribute('timestamp');
+      const dateObj = rawTime ? new Date(rawTime) : new Date(0);
+      const timestamp = rawTime ? dateObj.toLocaleString() : 'N/A';
+      const changeset = targetEl.getAttribute('changeset') || 'N/A';
+
+      const tags = {};
+      targetEl.querySelectorAll('tag').forEach(tagEl => {
+        tags[tagEl.getAttribute('k')] = tagEl.getAttribute('v');
+      });
+
+      return { type, id, osmId, user, dateObj, timestamp, changeset, tags, targetEl };
+    }
+
+    function createMapLayer(item, color) {
+      let layer;
+      if (item.type === 'node') {
+        const lat = parseFloat(item.targetEl.getAttribute('lat'));
+        const lon = parseFloat(item.targetEl.getAttribute('lon'));
+        if (!isNaN(lat) && !isNaN(lon)) {
+          layer = L.circleMarker([lat, lon], {
+            radius: 7,
+            fillColor: color,
+            color: '#ffffff',
+            weight: 2,
+            fillOpacity: 0.9
+          });
+        }
+      } else if (item.type === 'way') {
+        const latlngs = [];
+        item.targetEl.querySelectorAll('nd').forEach(ndEl => {
+          const lat = parseFloat(ndEl.getAttribute('lat'));
+          const lon = parseFloat(ndEl.getAttribute('lon'));
+          if (!isNaN(lat) && !isNaN(lon)) {
+            latlngs.push([lat, lon]);
+          }
+        });
+        if (latlngs.length > 0) {
+          layer = L.polyline(latlngs, { color: color, weight: 4, opacity: 0.9 });
+        }
+      }
+      return layer;
+    }
 
     fetchBtn.addEventListener('click', async () => {
       if (map.getZoom() < MAX_ZOOM) return;
@@ -77,10 +132,12 @@
       const n = bounds.getNorth();
       const e = bounds.getEast();
       
-      statusDiv.textContent = 'Querying Overpass API for deleted objects...';
+      isFetching = true;
       fetchBtn.disabled = true;
+      statusDiv.dataset.hasResults = 'true';
+      statusDiv.textContent = 'Querying Overpass API...';
       resultsDiv.innerHTML = '';
-      deletedLayerGroup.clearLayers();
+      mapLayerGroup.clearLayers();
 
       const overpassQuery = `[timeout:999][adiff:"2014-01-01T00:00:00Z"];(node(${s},${w},${n},${e});way(${s},${w},${n},${e});relation(${s},${w},${n},${e}););out meta geom;`;
 
@@ -98,110 +155,106 @@
         const parseError = xmlDoc.querySelector('parsererror');
         if (parseError) throw new Error('Failed to parse XML response from Overpass API.');
 
-        const deleteActions = xmlDoc.querySelectorAll('action[type="delete"]');
+        const deleteActions = Array.from(xmlDoc.querySelectorAll('action[type="delete"]'));
 
         if (deleteActions.length === 0) {
-          statusDiv.textContent = 'No deleted objects found in the selected viewport since 2020.';
-          updateButtonState();
+          const createActions = Array.from(xmlDoc.querySelectorAll('action[type="create"]'));
+
+          if (createActions.length === 0) {
+            statusDiv.textContent = 'No deleted or created objects found in the selected viewport since 2014.';
+            return;
+          }
+
+          const createdItems = createActions.map(action => {
+            const targetEl = action.querySelector('new > node, new > way, new > relation') || action.querySelector('node, way, relation');
+            if (!targetEl) return null;
+            return parseElementData(targetEl);
+          }).filter(item => item !== null);
+
+          createdItems.sort((a, b) => a.dateObj - b.dateObj);
+
+          statusDiv.textContent = `No deleted objects. Showing ${createdItems.length} created object(s) chronologically.`;
+
+          renderItemList(createdItems, '#10b981', 'Created');
           return;
         }
 
         statusDiv.textContent = `Found ${deleteActions.length} deleted object(s) in this area.`;
 
-        deleteActions.forEach((action, idx) => {
-          const oldEl = action.querySelector('old');
-          if (!oldEl) return;
+        const deletedItems = deleteActions.map(action => {
+          const targetEl = action.querySelector('old > node, old > way, old > relation') || action.querySelector('node, way, relation');
+          if (!targetEl) return null;
+          return parseElementData(targetEl);
+        }).filter(item => item !== null);
 
-          const targetEl = oldEl.firstElementChild;
-          if (!targetEl) return;
-
-          const type = targetEl.tagName;
-          const id = targetEl.getAttribute('id');
-          const osmId = `${type}/${id}`;
-          const user = targetEl.getAttribute('user') || 'Anonymous';
-          const rawTime = targetEl.getAttribute('timestamp');
-          const timestamp = rawTime ? new Date(rawTime).toLocaleString() : 'N/A';
-          const changeset = targetEl.getAttribute('changeset') || 'N/A';
-
-          const tags = {};
-          targetEl.querySelectorAll('tag').forEach(tagEl => {
-            tags[tagEl.getAttribute('k')] = tagEl.getAttribute('v');
-          });
-
-          let layer;
-          if (type === 'node') {
-            const lat = parseFloat(targetEl.getAttribute('lat'));
-            const lon = parseFloat(targetEl.getAttribute('lon'));
-            if (!isNaN(lat) && !isNaN(lon)) {
-              layer = L.circleMarker([lat, lon], {
-                radius: 7,
-                fillColor: '#e11d48',
-                color: '#ffffff',
-                weight: 2,
-                fillOpacity: 0.9
-              });
-            }
-          } else if (type === 'way') {
-            const latlngs = [];
-            targetEl.querySelectorAll('nd').forEach(ndEl => {
-              const lat = parseFloat(ndEl.getAttribute('lat'));
-              const lon = parseFloat(ndEl.getAttribute('lon'));
-              if (!isNaN(lat) && !isNaN(lon)) {
-                latlngs.push([lat, lon]);
-              }
-            });
-            if (latlngs.length > 0) {
-              layer = L.polyline(latlngs, { color: '#e11d48', weight: 4, opacity: 0.9 });
-            }
-          }
-
-          if (layer) {
-            layer.bindPopup(`<strong>OSM ID:</strong> ${osmId}<br/><strong>u/</strong> ${user}<br/><strong>Date:</strong> ${timestamp}`);
-            deletedLayerGroup.addLayer(layer);
-          }
-
-          const card = document.createElement('div');
-          card.className = 'card';
-
-          let tagsHtml = '';
-          const tagEntries = Object.entries(tags);
-          if (tagEntries.length > 0) {
-            tagsHtml = `<table class="tag-table">` + 
-              tagEntries.map(([k, v]) => `<tr><td><b>${k}</b></td><td>${v}</td></tr>`).join('') +
-              `</table>`;
-          }
-
-          card.innerHTML = `
-            <div class="card-title">${osmId}</div>
-            <div class="card-meta">
-              <strong>Deleted by:</strong> ${user}<br/>
-              <strong>Date:</strong> ${timestamp}<br/>
-              <strong>Changeset ID:</strong> ${changeset}
-            </div>
-            ${tagsHtml}
-          `;
-
-          card.addEventListener('click', () => {
-            if (layer) {
-              if (layer.getBounds) {
-                map.fitBounds(layer.getBounds(), { maxZoom: MAX_ZOOM, padding: [20, 20] });
-              } else if (layer.getLatLng) {
-                map.setView(layer.getLatLng(), MAX_ZOOM);
-              }
-              layer.openPopup();
-            }
-          });
-
-          resultsDiv.appendChild(card);
-        });
+        renderItemList(deletedItems, '#e11d48', 'Deleted');
 
       } catch (err) {
         console.error(err);
         statusDiv.textContent = 'Error fetching data from Overpass API. Ensure the bounding box is small.';
       } finally {
-        updateButtonState();
+        isFetching = false;
+        updateZoomState();
       }
     });
+
+    function renderItemList(items, color, actionLabel) {
+      const fragment = document.createDocumentFragment();
+      const renderLimit = Math.min(items.length, 500);
+
+      for (let i = 0; i < renderLimit; i++) {
+        const item = items[i];
+        const layer = createMapLayer(item, color);
+
+        if (layer) {
+          layer.bindPopup(`<strong>${actionLabel}:</strong> ${item.osmId}<br/><strong>User:</strong> ${item.user}<br/><strong>Date:</strong> ${item.timestamp}`);
+          mapLayerGroup.addLayer(layer);
+        }
+
+        const card = document.createElement('div');
+        card.className = actionLabel === 'Created' ? 'card create-card' : 'card';
+
+        let tagsHtml = '';
+        const tagEntries = Object.entries(item.tags);
+        if (tagEntries.length > 0) {
+          tagsHtml = `<table class="tag-table">` + 
+            tagEntries.map(([k, v]) => `<tr><td><b>${k}</b></td><td>${v}</td></tr>`).join('') +
+            `</table>`;
+        }
+
+        card.innerHTML = `
+          <div class="card-title">${actionLabel}: ${item.osmId}</div>
+          <div class="card-meta">
+            <strong></strong> ${item.user}<br/>
+            <strong>Date:</strong> ${item.timestamp}<br/>
+            <strong>Changeset ID:</strong> ${item.changeset}
+          </div>
+          ${tagsHtml}
+        `;
+
+        card.addEventListener('click', () => {
+          if (layer) {
+            if (layer.getBounds) {
+              map.fitBounds(layer.getBounds(), { maxZoom: MAX_ZOOM, padding: [20, 20] });
+            } else if (layer.getLatLng) {
+              map.setView(layer.getLatLng(), MAX_ZOOM);
+            }
+            layer.openPopup();
+          }
+        });
+
+        fragment.appendChild(card);
+      }
+
+      resultsDiv.appendChild(fragment);
+
+      if (items.length > renderLimit) {
+        const notice = document.createElement('div');
+        notice.className = 'notice';
+        notice.textContent = `Showing first ${renderLimit} items to preserve memory (${items.length - renderLimit} remaining omitted from DOM).`;
+        resultsDiv.appendChild(notice);
+      }
+    }
   </script>
 </body>
 </html>
